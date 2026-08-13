@@ -4,9 +4,6 @@ const bcrypt = require('bcryptjs');
 
 const router = express.Router();
 
-// Owner credentials come from environment variables, not the database,
-// since there's only ever one owner. OWNER_PASSWORD_HASH is a bcrypt hash
-// (see instructions.md for how to generate it).
 router.post('/login', async (req, res) => {
   const { username, password } = req.body;
 

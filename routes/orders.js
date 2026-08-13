@@ -99,6 +99,26 @@ router.post('/', async (req, res) => {
   }
 });
 
+// Public: look up a customer's past orders by phone number.
+// IMPORTANT: this must come BEFORE "/:id" below, otherwise Express
+// treats "history" as an :id value and this route never gets hit.
+router.get('/history', async (req, res) => {
+  const { phone } = req.query;
+  if (!phone) {
+    return res.status(400).json({ error: 'Phone number is required' });
+  }
+  try {
+    const result = await pool.query(
+      'SELECT * FROM orders WHERE phone = $1 ORDER BY created_at DESC',
+      [phone.trim()]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Could not load order history' });
+  }
+});
+
 // Public: check status of a single order (for the customer's confirmation page)
 router.get('/:id', async (req, res) => {
   try {

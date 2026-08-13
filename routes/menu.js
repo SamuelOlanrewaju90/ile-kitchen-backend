@@ -4,7 +4,6 @@ const { requireOwner } = require('../middleware/auth');
 
 const router = express.Router();
 
-// Public: list available menu items
 router.get('/', async (req, res) => {
   try {
     const result = await pool.query(
@@ -17,7 +16,6 @@ router.get('/', async (req, res) => {
   }
 });
 
-// Owner: list ALL menu items, including unavailable ones
 router.get('/all', requireOwner, async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM menu_items ORDER BY category, id');
@@ -28,7 +26,6 @@ router.get('/all', requireOwner, async (req, res) => {
   }
 });
 
-// Owner: add a menu item
 router.post('/', requireOwner, async (req, res) => {
   const { name, description, price, image_url, category } = req.body;
   if (!name || !price) {
@@ -47,7 +44,6 @@ router.post('/', requireOwner, async (req, res) => {
   }
 });
 
-// Owner: update a menu item (e.g. toggle availability, change price)
 router.put('/:id', requireOwner, async (req, res) => {
   const { id } = req.params;
   const { name, description, price, image_url, category, available } = req.body;
@@ -71,7 +67,6 @@ router.put('/:id', requireOwner, async (req, res) => {
   }
 });
 
-// Owner: delete a menu item
 router.delete('/:id', requireOwner, async (req, res) => {
   const { id } = req.params;
   try {
