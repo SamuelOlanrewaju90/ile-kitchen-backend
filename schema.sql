@@ -1,5 +1,6 @@
--- Already applied to your live Neon database. Kept here for reference
--- only, in case you ever need to rebuild the schema from scratch.
+-- Original schema, already applied to your live database.
+-- For the newer features (settings, reviews, featured items),
+-- see migration.sql — run that one in Neon's SQL Editor.
 
 CREATE TABLE IF NOT EXISTS menu_items (
   id SERIAL PRIMARY KEY,

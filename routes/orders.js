@@ -7,16 +7,13 @@ const router = express.Router();
 
 const DELIVERY_FEE = 500; // flat delivery fee in naira, adjust as needed
 
-// Helper: verify a Paystack transaction server-side before trusting it
 function verifyPaystackTransaction(reference) {
   return new Promise((resolve, reject) => {
     const options = {
       hostname: 'api.paystack.co',
       path: `/transaction/verify/${encodeURIComponent(reference)}`,
       method: 'GET',
-      headers: {
-        Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`
-      }
+      headers: { Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}` }
     };
     const request = https.request(options, (response) => {
       let data = '';
@@ -34,6 +31,11 @@ function verifyPaystackTransaction(reference) {
   });
 }
 
+async function getSetting(key, fallback) {
+  const result = await pool.query('SELECT value FROM settings WHERE key = $1', [key]);
+  return result.rows[0]?.value ?? fallback;
+}
+
 // Public: place an order
 router.post('/', async (req, res) => {
   const { customer_name, phone, address, notes, items, payment_method, payment_reference } = req.body;
@@ -45,7 +47,22 @@ router.post('/', async (req, res) => {
     return res.status(400).json({ error: 'Invalid payment method' });
   }
 
+  // Refuse new orders while the restaurant is marked closed
+  const isOpen = (await getSetting('restaurant_open', 'true')) !== 'false';
+  if (!isOpen) {
+    return res.status(400).json({ error: "We're closed right now — please check back soon." });
+  }
+
   const subtotal = items.reduce((sum, item) => sum + item.price * item.quantity, 0);
+
+  // Enforce a minimum order amount, if one is configured
+  const minOrder = Number(await getSetting('min_order_amount', '0'));
+  if (minOrder > 0 && subtotal < minOrder) {
+    return res.status(400).json({
+      error: `Minimum order amount is ₦${minOrder.toLocaleString()}. Add a bit more to your cart.`
+    });
+  }
+
   const total = subtotal + DELIVERY_FEE;
 
   let payment_status = 'pending';
@@ -99,9 +116,8 @@ router.post('/', async (req, res) => {
   }
 });
 
-// Public: look up a customer's past orders by phone number.
-// IMPORTANT: this must come BEFORE "/:id" below, otherwise Express
-// treats "history" as an :id value and this route never gets hit.
+// Public: look up a customer's past orders by phone number, including
+// whether each order has already been reviewed (for the "leave a review" button)
 router.get('/history', async (req, res) => {
   const { phone } = req.query;
   if (!phone) {
@@ -109,7 +125,13 @@ router.get('/history', async (req, res) => {
   }
   try {
     const result = await pool.query(
-      'SELECT * FROM orders WHERE phone = $1 ORDER BY created_at DESC',
+      `SELECT orders.*,
+              reviews.id IS NOT NULL AS has_review,
+              reviews.rating AS review_rating
+       FROM orders
+       LEFT JOIN reviews ON reviews.order_id = orders.id
+       WHERE orders.phone = $1
+       ORDER BY orders.created_at DESC`,
       [phone.trim()]
     );
     res.json(result.rows);
@@ -119,7 +141,7 @@ router.get('/history', async (req, res) => {
   }
 });
 
-// Public: check status of a single order (for the customer's confirmation page)
+// Public: check status of a single order
 router.get('/:id', async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM orders WHERE id = $1', [req.params.id]);
