@@ -1,11 +1,11 @@
 const express = require('express');
 const https = require('https');
 const pool = require('../db');
-const { requireOwner } = require('../middleware/auth');
+const { requireAuth, attachVendorId } = require('../middleware/auth');
 
 const router = express.Router();
 
-const DELIVERY_FEE = 500; // flat delivery fee in naira, adjust as needed
+const DELIVERY_FEE = 500;
 
 function verifyPaystackTransaction(reference) {
   return new Promise((resolve, reject) => {
@@ -36,26 +36,28 @@ async function getSetting(key, fallback) {
   return result.rows[0]?.value ?? fallback;
 }
 
-// Public: place an order
+// Public: place an order with a specific vendor
 router.post('/', async (req, res) => {
-  const { customer_name, phone, address, notes, items, payment_method, payment_reference } = req.body;
+  const { vendor_id, customer_name, phone, address, notes, items, payment_method, payment_reference } = req.body;
 
-  if (!customer_name || !phone || !address || !items || !items.length) {
+  if (!vendor_id || !customer_name || !phone || !address || !items || !items.length) {
     return res.status(400).json({ error: 'Missing required order details' });
   }
   if (!['cod', 'paystack'].includes(payment_method)) {
     return res.status(400).json({ error: 'Invalid payment method' });
   }
 
-  // Refuse new orders while the restaurant is marked closed
-  const isOpen = (await getSetting('restaurant_open', 'true')) !== 'false';
-  if (!isOpen) {
-    return res.status(400).json({ error: "We're closed right now — please check back soon." });
+  const vendorResult = await pool.query('SELECT * FROM vendors WHERE id = $1', [vendor_id]);
+  const vendor = vendorResult.rows[0];
+  if (!vendor || !vendor.is_approved) {
+    return res.status(400).json({ error: 'This restaurant is not available right now.' });
+  }
+  if (!vendor.is_open) {
+    return res.status(400).json({ error: "This restaurant is closed right now — please check back soon." });
   }
 
   const subtotal = items.reduce((sum, item) => sum + item.price * item.quantity, 0);
 
-  // Enforce a minimum order amount, if one is configured
   const minOrder = Number(await getSetting('min_order_amount', '0'));
   if (minOrder > 0 && subtotal < minOrder) {
     return res.status(400).json({
@@ -64,7 +66,6 @@ router.post('/', async (req, res) => {
   }
 
   const total = subtotal + DELIVERY_FEE;
-
   let payment_status = 'pending';
 
   if (payment_method === 'paystack') {
@@ -93,9 +94,10 @@ router.post('/', async (req, res) => {
   try {
     const result = await pool.query(
       `INSERT INTO orders
-        (customer_name, phone, address, notes, items, subtotal, delivery_fee, total, payment_method, payment_status, payment_reference)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+        (vendor_id, customer_name, phone, address, notes, items, subtotal, delivery_fee, total, payment_method, payment_status, payment_reference)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
       [
+        vendor_id,
         customer_name,
         phone,
         address,
@@ -116,19 +118,16 @@ router.post('/', async (req, res) => {
   }
 });
 
-// Public: look up a customer's past orders by phone number, including
-// whether each order has already been reviewed (for the "leave a review" button)
+// Public: a customer's order history across ALL vendors, by phone number
 router.get('/history', async (req, res) => {
   const { phone } = req.query;
-  if (!phone) {
-    return res.status(400).json({ error: 'Phone number is required' });
-  }
+  if (!phone) return res.status(400).json({ error: 'Phone number is required' });
   try {
     const result = await pool.query(
-      `SELECT orders.*,
-              reviews.id IS NOT NULL AS has_review,
-              reviews.rating AS review_rating
+      `SELECT orders.*, vendors.name AS vendor_name,
+              reviews.id IS NOT NULL AS has_review, reviews.rating AS review_rating
        FROM orders
+       LEFT JOIN vendors ON orders.vendor_id = vendors.id
        LEFT JOIN reviews ON reviews.order_id = orders.id
        WHERE orders.phone = $1
        ORDER BY orders.created_at DESC`,
@@ -141,10 +140,15 @@ router.get('/history', async (req, res) => {
   }
 });
 
-// Public: check status of a single order
+// Public: single order status, with vendor name for display
 router.get('/:id', async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM orders WHERE id = $1', [req.params.id]);
+    const result = await pool.query(
+      `SELECT orders.*, vendors.name AS vendor_name
+       FROM orders LEFT JOIN vendors ON orders.vendor_id = vendors.id
+       WHERE orders.id = $1`,
+      [req.params.id]
+    );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Order not found' });
     res.json(result.rows[0]);
   } catch (err) {
@@ -153,10 +157,13 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// Owner: list all orders, newest first
-router.get('/', requireOwner, async (req, res) => {
+// Vendor: MY orders only, newest first
+router.get('/', requireAuth, attachVendorId, async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM orders ORDER BY created_at DESC');
+    const result = await pool.query(
+      'SELECT * FROM orders WHERE vendor_id = $1 ORDER BY created_at DESC',
+      [req.vendorId]
+    );
     res.json(result.rows);
   } catch (err) {
     console.error(err);
@@ -164,8 +171,8 @@ router.get('/', requireOwner, async (req, res) => {
   }
 });
 
-// Owner: update order status as it moves through the delivery process
-router.put('/:id/status', requireOwner, async (req, res) => {
+// Vendor: update status on one of MY orders (ownership enforced in WHERE clause)
+router.put('/:id/status', requireAuth, attachVendorId, async (req, res) => {
   const { order_status } = req.body;
   const valid = ['received', 'preparing', 'out_for_delivery', 'delivered', 'cancelled'];
   if (!valid.includes(order_status)) {
@@ -173,8 +180,8 @@ router.put('/:id/status', requireOwner, async (req, res) => {
   }
   try {
     const result = await pool.query(
-      'UPDATE orders SET order_status = $1 WHERE id = $2 RETURNING *',
-      [order_status, req.params.id]
+      'UPDATE orders SET order_status = $1 WHERE id = $2 AND vendor_id = $3 RETURNING *',
+      [order_status, req.params.id, req.vendorId]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Order not found' });
     res.json(result.rows[0]);
