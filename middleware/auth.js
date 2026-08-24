@@ -38,4 +38,21 @@ async function attachVendorId(req, res, next) {
   }
 }
 
-module.exports = { requireAuth, requireAdmin, attachVendorId };
+// Looks up the rider row for the logged-in user and attaches its id
+// to req.riderId, so rider-only routes can scope every query to just
+// that rider's own deliveries.
+async function attachRiderId(req, res, next) {
+  try {
+    const result = await pool.query('SELECT id FROM riders WHERE user_id = $1', [req.user.id]);
+    if (result.rows.length === 0) {
+      return res.status(403).json({ error: 'No rider profile found for this account.' });
+    }
+    req.riderId = result.rows[0].id;
+    next();
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Could not verify rider account' });
+  }
+}
+
+module.exports = { requireAuth, requireAdmin, attachVendorId, attachRiderId };

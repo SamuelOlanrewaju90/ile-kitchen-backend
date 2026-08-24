@@ -140,12 +140,20 @@ router.get('/history', async (req, res) => {
   }
 });
 
-// Public: single order status, with vendor name for display
+// Public: single order status, with vendor name and — once a rider has
+// picked it up — the rider's name and last known location, so the
+// customer can see roughly where their delivery is.
 router.get('/:id', async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT orders.*, vendors.name AS vendor_name
-       FROM orders LEFT JOIN vendors ON orders.vendor_id = vendors.id
+      `SELECT orders.*, vendors.name AS vendor_name,
+              riders.current_lat AS rider_lat, riders.current_lng AS rider_lng,
+              riders.location_updated_at AS rider_location_updated_at,
+              rider_users.name AS rider_name
+       FROM orders
+       LEFT JOIN vendors ON orders.vendor_id = vendors.id
+       LEFT JOIN riders ON orders.rider_id = riders.id
+       LEFT JOIN users rider_users ON riders.user_id = rider_users.id
        WHERE orders.id = $1`,
       [req.params.id]
     );
@@ -171,7 +179,9 @@ router.get('/', requireAuth, attachVendorId, async (req, res) => {
   }
 });
 
-// Vendor: update status on one of MY orders (ownership enforced in WHERE clause)
+// Vendor: update status on one of MY orders. Marking an order
+// "out_for_delivery" also flips delivery_status to "ready" — the moment
+// it becomes visible in the riders' available-orders pool.
 router.put('/:id/status', requireAuth, attachVendorId, async (req, res) => {
   const { order_status } = req.body;
   const valid = ['received', 'preparing', 'out_for_delivery', 'delivered', 'cancelled'];
@@ -179,8 +189,10 @@ router.put('/:id/status', requireAuth, attachVendorId, async (req, res) => {
     return res.status(400).json({ error: 'Invalid status' });
   }
   try {
+    const deliveryStatusUpdate = order_status === 'out_for_delivery' ? `, delivery_status = 'ready'` : '';
     const result = await pool.query(
-      'UPDATE orders SET order_status = $1 WHERE id = $2 AND vendor_id = $3 RETURNING *',
+      `UPDATE orders SET order_status = $1 ${deliveryStatusUpdate}
+       WHERE id = $2 AND vendor_id = $3 RETURNING *`,
       [order_status, req.params.id, req.vendorId]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Order not found' });
