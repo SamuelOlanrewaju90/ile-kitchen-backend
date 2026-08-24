@@ -1,7 +1,7 @@
 const express = require('express');
 const https = require('https');
 const pool = require('../db');
-const { requireAuth, attachVendorId } = require('../middleware/auth');
+const { requireAuth, requireAdmin, attachVendorId } = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -91,11 +91,19 @@ router.post('/', async (req, res) => {
     }
   }
 
+  // Commission split, computed once at order time using the vendor's
+  // CURRENT commission rate — locked into the order so a later rate
+  // change never retroactively rewrites past orders.
+  const platform_fee = Math.round(subtotal * (Number(vendor.commission_rate) / 100) * 100) / 100;
+  const vendor_payout = Math.round((subtotal - platform_fee) * 100) / 100;
+  const rider_fee = DELIVERY_FEE;
+
   try {
     const result = await pool.query(
       `INSERT INTO orders
-        (vendor_id, customer_name, phone, address, notes, items, subtotal, delivery_fee, total, payment_method, payment_status, payment_reference)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+        (vendor_id, customer_name, phone, address, notes, items, subtotal, delivery_fee, total,
+         payment_method, payment_status, payment_reference, platform_fee, vendor_payout, rider_fee)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
       [
         vendor_id,
         customer_name,
@@ -108,7 +116,10 @@ router.post('/', async (req, res) => {
         total,
         payment_method,
         payment_status,
-        payment_reference || null
+        payment_reference || null,
+        platform_fee,
+        vendor_payout,
+        rider_fee
       ]
     );
     res.status(201).json(result.rows[0]);
@@ -140,9 +151,7 @@ router.get('/history', async (req, res) => {
   }
 });
 
-// Public: single order status, with vendor name and — once a rider has
-// picked it up — the rider's name and last known location, so the
-// customer can see roughly where their delivery is.
+// Public: single order status, with vendor name and rider location
 router.get('/:id', async (req, res) => {
   try {
     const result = await pool.query(
@@ -179,9 +188,7 @@ router.get('/', requireAuth, attachVendorId, async (req, res) => {
   }
 });
 
-// Vendor: update status on one of MY orders. Marking an order
-// "out_for_delivery" also flips delivery_status to "ready" — the moment
-// it becomes visible in the riders' available-orders pool.
+// Vendor: update status on one of MY orders
 router.put('/:id/status', requireAuth, attachVendorId, async (req, res) => {
   const { order_status } = req.body;
   const valid = ['received', 'preparing', 'out_for_delivery', 'delivered', 'cancelled'];
@@ -200,6 +207,47 @@ router.put('/:id/status', requireAuth, attachVendorId, async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Could not update order' });
+  }
+});
+
+// Admin: every delivered order whose money hasn't been reconciled yet —
+// for cash orders this is what the vendor owes the platform (they kept
+// the customer's cash, platform gets nothing automatically); for rider
+// fees this is what's owed to the rider regardless of payment method,
+// since riders are always paid out manually in this build.
+router.get('/admin/unsettled', requireAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT orders.id, orders.payment_method, orders.total, orders.platform_fee,
+              orders.vendor_payout, orders.rider_fee, orders.created_at,
+              vendors.name AS vendor_name, rider_users.name AS rider_name
+       FROM orders
+       LEFT JOIN vendors ON orders.vendor_id = vendors.id
+       LEFT JOIN riders ON orders.rider_id = riders.id
+       LEFT JOIN users rider_users ON riders.user_id = rider_users.id
+       WHERE orders.order_status = 'delivered' AND orders.payout_settled = false
+       ORDER BY orders.created_at ASC`
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Could not load unsettled orders' });
+  }
+});
+
+// Admin: mark one order's payout as reconciled (money has changed hands
+// outside the app — a bank transfer, cash handover, etc.)
+router.put('/:id/settle', requireAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'UPDATE orders SET payout_settled = true WHERE id = $1 RETURNING *',
+      [req.params.id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Order not found' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Could not settle order' });
   }
 });
 

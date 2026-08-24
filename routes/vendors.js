@@ -4,7 +4,7 @@ const { requireAuth, requireAdmin } = require('../middleware/auth');
 
 const router = express.Router();
 
-// Public: browse approved vendors (Section 4 will add filtering/search on top of this)
+// Public: browse approved vendors
 router.get('/', async (req, res) => {
   try {
     const result = await pool.query(
@@ -18,11 +18,16 @@ router.get('/', async (req, res) => {
   }
 });
 
-// Public: one vendor's storefront profile
+// Public: one vendor's storefront profile. Includes commission_rate and
+// paystack_subaccount_code — neither is sensitive (the subaccount code
+// only works alongside our own secret key, and the rate is just a
+// percentage) but both are needed by the frontend at checkout to build
+// the correct Paystack split parameters.
 router.get('/:id', async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT id, name, description, logo_url, cuisine_type, address, is_open
+      `SELECT id, name, description, logo_url, cuisine_type, address, is_open,
+              commission_rate, paystack_subaccount_code
        FROM vendors WHERE id = $1 AND is_approved = true`,
       [req.params.id]
     );
@@ -34,9 +39,7 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// Vendor: create your vendor profile — step 2 of onboarding, after
-// registering a "vendor" account via /api/auth/register. Starts
-// unapproved until an admin reviews it.
+// Vendor: create your vendor profile
 router.post('/', requireAuth, async (req, res) => {
   if (req.user.role !== 'vendor') {
     return res.status(403).json({ error: 'Only vendor accounts can create a vendor profile' });
@@ -60,8 +63,7 @@ router.post('/', requireAuth, async (req, res) => {
   }
 });
 
-// Vendor: get my own profile (works even before approval, so the
-// dashboard can show a "pending approval" state)
+// Vendor: get my own profile
 router.get('/me/profile', requireAuth, async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM vendors WHERE owner_id = $1', [req.user.id]);
@@ -73,9 +75,10 @@ router.get('/me/profile', requireAuth, async (req, res) => {
   }
 });
 
-// Vendor: update my own profile, including the open/closed toggle
+// Vendor: update my own profile, including open/closed and their own
+// Paystack subaccount code (pasted in from their own Paystack dashboard)
 router.put('/me/profile', requireAuth, async (req, res) => {
-  const { name, description, logo_url, cuisine_type, address, is_open } = req.body;
+  const { name, description, logo_url, cuisine_type, address, is_open, paystack_subaccount_code } = req.body;
   try {
     const result = await pool.query(
       `UPDATE vendors SET
@@ -84,9 +87,10 @@ router.put('/me/profile', requireAuth, async (req, res) => {
         logo_url = COALESCE($3, logo_url),
         cuisine_type = COALESCE($4, cuisine_type),
         address = COALESCE($5, address),
-        is_open = COALESCE($6, is_open)
-       WHERE owner_id = $7 RETURNING *`,
-      [name, description, logo_url, cuisine_type, address, is_open, req.user.id]
+        is_open = COALESCE($6, is_open),
+        paystack_subaccount_code = COALESCE($7, paystack_subaccount_code)
+       WHERE owner_id = $8 RETURNING *`,
+      [name, description, logo_url, cuisine_type, address, is_open, paystack_subaccount_code, req.user.id]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'No vendor profile yet' });
     res.json(result.rows[0]);
@@ -127,6 +131,26 @@ router.put('/admin/:id/approval', requireAdmin, async (req, res) => {
   }
 });
 
+// Admin: change a vendor's commission rate
+router.put('/admin/:id/commission', requireAdmin, async (req, res) => {
+  const { commission_rate } = req.body;
+  const rate = Number(commission_rate);
+  if (isNaN(rate) || rate < 0 || rate > 100) {
+    return res.status(400).json({ error: 'Commission rate must be a number between 0 and 100' });
+  }
+  try {
+    const result = await pool.query(
+      'UPDATE vendors SET commission_rate = $1 WHERE id = $2 RETURNING *',
+      [rate, req.params.id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Vendor not found' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Could not update commission rate' });
+  }
+});
+
 // Admin: platform-wide numbers
 router.get('/admin/stats', requireAdmin, async (req, res) => {
   try {
@@ -136,11 +160,15 @@ router.get('/admin/stats', requireAdmin, async (req, res) => {
     const revenue = await pool.query(
       "SELECT COALESCE(SUM(total), 0)::float AS total FROM orders WHERE payment_status = 'paid' OR payment_method = 'cod'"
     );
+    const platformEarnings = await pool.query(
+      "SELECT COALESCE(SUM(platform_fee), 0)::float AS total FROM orders WHERE order_status = 'delivered'"
+    );
     res.json({
       vendors: vendorCount.rows[0].count,
       approvedVendors: approvedCount.rows[0].count,
       orders: orderCount.rows[0].count,
-      revenue: revenue.rows[0].total
+      revenue: revenue.rows[0].total,
+      platformEarnings: platformEarnings.rows[0].total
     });
   } catch (err) {
     console.error(err);
