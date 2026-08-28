@@ -4,12 +4,50 @@ const { requireAuth, requireAdmin } = require('../middleware/auth');
 
 const router = express.Router();
 
-// Public: browse approved vendors
+// Public: browse approved vendors, with optional search/filter/sort.
+// Query params (all optional): search, cuisine, open_only, min_rating, sort
 router.get('/', async (req, res) => {
+  const { search, cuisine, open_only, min_rating, sort } = req.query;
+
+  const conditions = ['vendors.is_approved = true'];
+  const params = [];
+
+  if (search) {
+    params.push(`%${search}%`);
+    conditions.push(`(vendors.name ILIKE $${params.length} OR vendors.cuisine_type ILIKE $${params.length})`);
+  }
+  if (cuisine) {
+    params.push(cuisine);
+    conditions.push(`vendors.cuisine_type = $${params.length}`);
+  }
+  if (open_only === 'true') {
+    conditions.push('vendors.is_open = true');
+  }
+
+  let havingClause = '';
+  if (min_rating) {
+    params.push(Number(min_rating));
+    havingClause = `HAVING COALESCE(AVG(reviews.rating), 0) >= $${params.length}`;
+  }
+
+  let orderClause = 'vendors.name ASC';
+  if (sort === 'rating') orderClause = 'average_rating DESC NULLS LAST, vendors.name ASC';
+  if (sort === 'newest') orderClause = 'vendors.created_at DESC';
+
   try {
     const result = await pool.query(
-      `SELECT id, name, description, logo_url, cuisine_type, address, is_open
-       FROM vendors WHERE is_approved = true ORDER BY name`
+      `SELECT vendors.id, vendors.name, vendors.description, vendors.logo_url,
+              vendors.cuisine_type, vendors.address, vendors.is_open,
+              COALESCE(AVG(reviews.rating), 0)::float AS average_rating,
+              COUNT(reviews.id)::int AS review_count
+       FROM vendors
+       LEFT JOIN orders ON orders.vendor_id = vendors.id
+       LEFT JOIN reviews ON reviews.order_id = orders.id
+       WHERE ${conditions.join(' AND ')}
+       GROUP BY vendors.id
+       ${havingClause}
+       ORDER BY ${orderClause}`,
+      params
     );
     res.json(result.rows);
   } catch (err) {
@@ -18,17 +56,36 @@ router.get('/', async (req, res) => {
   }
 });
 
-// Public: one vendor's storefront profile. Includes commission_rate and
-// paystack_subaccount_code — neither is sensitive (the subaccount code
-// only works alongside our own secret key, and the rate is just a
-// percentage) but both are needed by the frontend at checkout to build
-// the correct Paystack split parameters.
+// Public: distinct cuisine types among approved vendors, for a filter dropdown.
+// Placed at a distinct path (not "/:id") so it's never mistaken for a vendor id.
+router.get('/meta/cuisines', async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT DISTINCT cuisine_type FROM vendors
+       WHERE is_approved = true AND cuisine_type IS NOT NULL AND cuisine_type != ''
+       ORDER BY cuisine_type`
+    );
+    res.json(result.rows.map((r) => r.cuisine_type));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Could not load cuisine types' });
+  }
+});
+
+// Public: one vendor's storefront profile, including its aggregate rating
 router.get('/:id', async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT id, name, description, logo_url, cuisine_type, address, is_open,
-              commission_rate, paystack_subaccount_code
-       FROM vendors WHERE id = $1 AND is_approved = true`,
+      `SELECT vendors.id, vendors.name, vendors.description, vendors.logo_url,
+              vendors.cuisine_type, vendors.address, vendors.is_open,
+              vendors.commission_rate, vendors.paystack_subaccount_code,
+              COALESCE(AVG(reviews.rating), 0)::float AS average_rating,
+              COUNT(reviews.id)::int AS review_count
+       FROM vendors
+       LEFT JOIN orders ON orders.vendor_id = vendors.id
+       LEFT JOIN reviews ON reviews.order_id = orders.id
+       WHERE vendors.id = $1 AND vendors.is_approved = true
+       GROUP BY vendors.id`,
       [req.params.id]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Vendor not found' });
@@ -75,8 +132,7 @@ router.get('/me/profile', requireAuth, async (req, res) => {
   }
 });
 
-// Vendor: update my own profile, including open/closed and their own
-// Paystack subaccount code (pasted in from their own Paystack dashboard)
+// Vendor: update my own profile
 router.put('/me/profile', requireAuth, async (req, res) => {
   const { name, description, logo_url, cuisine_type, address, is_open, paystack_subaccount_code } = req.body;
   try {

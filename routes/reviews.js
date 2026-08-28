@@ -33,6 +33,25 @@ router.get('/', async (req, res) => {
   }
 });
 
+// Public: latest reviews for one specific vendor, for their storefront page
+router.get('/vendor/:vendorId', async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT reviews.id, reviews.rating, reviews.comment, reviews.created_at, orders.customer_name
+       FROM reviews
+       JOIN orders ON reviews.order_id = orders.id
+       WHERE orders.vendor_id = $1
+       ORDER BY reviews.created_at DESC
+       LIMIT 10`,
+      [req.params.vendorId]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Could not load vendor reviews' });
+  }
+});
+
 // Public: submit a review for a delivered order (one review per order)
 router.post('/', async (req, res) => {
   const { order_id, rating, comment } = req.body;
