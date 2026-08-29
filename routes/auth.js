@@ -13,8 +13,6 @@ function signToken(user) {
   );
 }
 
-// Register as a vendor or rider. Admin accounts are never created through
-// this endpoint — only granted manually in the database.
 router.post('/register', async (req, res) => {
   const { name, email, phone, password, role } = req.body;
   if (!name || !email || !password || !['vendor', 'rider'].includes(role)) {
@@ -28,13 +26,11 @@ router.post('/register', async (req, res) => {
     const hash = await bcrypt.hash(password, 10);
     const result = await pool.query(
       `INSERT INTO users (name, email, phone, password_hash, role)
-       VALUES ($1, $2, $3, $4, $5) RETURNING id, name, email, role, is_admin`,
+       VALUES ($1, $2, $3, $4, $5) RETURNING id, name, email, phone, role, is_admin`,
       [name, email, phone || '', hash, role]
     );
     const user = result.rows[0];
 
-    // Riders don't need a separate profile/approval step like vendors do —
-    // create their rider row immediately so they can go straight to work.
     if (role === 'rider') {
       await pool.query('INSERT INTO riders (user_id) VALUES ($1)', [user.id]);
     }

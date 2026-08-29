@@ -4,7 +4,6 @@ const { requireAdmin } = require('../middleware/auth');
 
 const router = express.Router();
 
-// Public: get all settings as a simple object, e.g. { restaurant_open: "true", ... }
 router.get('/', async (req, res) => {
   try {
     const result = await pool.query('SELECT key, value FROM settings');
@@ -17,7 +16,6 @@ router.get('/', async (req, res) => {
   }
 });
 
-// Admin: update one or more platform-wide settings at once
 router.put('/', requireAdmin, async (req, res) => {
   const updates = req.body;
   if (!updates || typeof updates !== 'object') {

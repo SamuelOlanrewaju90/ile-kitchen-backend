@@ -4,7 +4,6 @@ const { requireAuth, attachVendorId } = require('../middleware/auth');
 
 const router = express.Router();
 
-// Public: menu for one vendor's storefront
 router.get('/', async (req, res) => {
   const { vendor_id } = req.query;
   if (!vendor_id) return res.status(400).json({ error: 'vendor_id is required' });
@@ -20,7 +19,6 @@ router.get('/', async (req, res) => {
   }
 });
 
-// Vendor: my full menu, including unavailable items
 router.get('/mine', requireAuth, attachVendorId, async (req, res) => {
   try {
     const result = await pool.query(
@@ -34,7 +32,6 @@ router.get('/mine', requireAuth, attachVendorId, async (req, res) => {
   }
 });
 
-// Vendor: add an item to my menu
 router.post('/', requireAuth, attachVendorId, async (req, res) => {
   const { name, description, price, image_url, category } = req.body;
   if (!name || !price) return res.status(400).json({ error: 'Name and price are required' });
@@ -51,8 +48,6 @@ router.post('/', requireAuth, attachVendorId, async (req, res) => {
   }
 });
 
-// Vendor: update one of my items (ownership enforced in the WHERE clause,
-// not just by checking who's logged in — so vendor A can never edit vendor B's item)
 router.put('/:id', requireAuth, attachVendorId, async (req, res) => {
   const { name, description, price, image_url, category, available, featured } = req.body;
   try {

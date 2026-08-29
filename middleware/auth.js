@@ -21,9 +21,6 @@ function requireAdmin(req, res, next) {
   });
 }
 
-// Looks up the vendor row owned by the logged-in user and attaches its id
-// to req.vendorId, so vendor-only routes can scope every query to just
-// that vendor's own data.
 async function attachVendorId(req, res, next) {
   try {
     const result = await pool.query('SELECT id FROM vendors WHERE owner_id = $1', [req.user.id]);
@@ -38,9 +35,6 @@ async function attachVendorId(req, res, next) {
   }
 }
 
-// Looks up the rider row for the logged-in user and attaches its id
-// to req.riderId, so rider-only routes can scope every query to just
-// that rider's own deliveries.
 async function attachRiderId(req, res, next) {
   try {
     const result = await pool.query('SELECT id FROM riders WHERE user_id = $1', [req.user.id]);

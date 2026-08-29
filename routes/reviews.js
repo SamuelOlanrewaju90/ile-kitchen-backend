@@ -3,7 +3,6 @@ const pool = require('../db');
 
 const router = express.Router();
 
-// Public: overall rating summary for the homepage
 router.get('/summary', async (req, res) => {
   try {
     const result = await pool.query(
@@ -16,7 +15,6 @@ router.get('/summary', async (req, res) => {
   }
 });
 
-// Public: latest reviews (for a testimonials section if you want one later)
 router.get('/', async (req, res) => {
   try {
     const result = await pool.query(
@@ -33,7 +31,6 @@ router.get('/', async (req, res) => {
   }
 });
 
-// Public: latest reviews for one specific vendor, for their storefront page
 router.get('/vendor/:vendorId', async (req, res) => {
   try {
     const result = await pool.query(
@@ -52,7 +49,6 @@ router.get('/vendor/:vendorId', async (req, res) => {
   }
 });
 
-// Public: submit a review for a delivered order (one review per order)
 router.post('/', async (req, res) => {
   const { order_id, rating, comment } = req.body;
   const numericRating = Number(rating);

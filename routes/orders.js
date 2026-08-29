@@ -2,10 +2,19 @@ const express = require('express');
 const https = require('https');
 const pool = require('../db');
 const { requireAuth, requireAdmin, attachVendorId } = require('../middleware/auth');
+const { sendSMS } = require('../lib/sms');
 
 const router = express.Router();
 
 const DELIVERY_FEE = 500;
+
+const STATUS_MESSAGES = {
+  received: (order) => `Ilé Market: Order #${order.id} received by the restaurant and will be prepared shortly.`,
+  preparing: (order) => `Ilé Market: Order #${order.id} is being prepared now.`,
+  out_for_delivery: (order) => `Ilé Market: Order #${order.id} is out for delivery!`,
+  delivered: (order) => `Ilé Market: Order #${order.id} has been delivered. Enjoy your meal!`,
+  cancelled: (order) => `Ilé Market: Order #${order.id} was cancelled. Contact us if this is unexpected.`
+};
 
 function verifyPaystackTransaction(reference) {
   return new Promise((resolve, reject) => {
@@ -36,6 +45,17 @@ async function getSetting(key, fallback) {
   return result.rows[0]?.value ?? fallback;
 }
 
+async function notifyUser(userId, type, message, orderId = null) {
+  try {
+    await pool.query(
+      'INSERT INTO notifications (user_id, type, message, order_id) VALUES ($1, $2, $3, $4)',
+      [userId, type, message, orderId]
+    );
+  } catch (err) {
+    console.error('Could not create notification:', err);
+  }
+}
+
 // Public: place an order with a specific vendor
 router.post('/', async (req, res) => {
   const { vendor_id, customer_name, phone, address, notes, items, payment_method, payment_reference } = req.body;
@@ -47,7 +67,12 @@ router.post('/', async (req, res) => {
     return res.status(400).json({ error: 'Invalid payment method' });
   }
 
-  const vendorResult = await pool.query('SELECT * FROM vendors WHERE id = $1', [vendor_id]);
+  const vendorResult = await pool.query(
+    `SELECT vendors.*, users.phone AS owner_phone
+     FROM vendors JOIN users ON vendors.owner_id = users.id
+     WHERE vendors.id = $1`,
+    [vendor_id]
+  );
   const vendor = vendorResult.rows[0];
   if (!vendor || !vendor.is_approved) {
     return res.status(400).json({ error: 'This restaurant is not available right now.' });
@@ -91,9 +116,6 @@ router.post('/', async (req, res) => {
     }
   }
 
-  // Commission split, computed once at order time using the vendor's
-  // CURRENT commission rate — locked into the order so a later rate
-  // change never retroactively rewrites past orders.
   const platform_fee = Math.round(subtotal * (Number(vendor.commission_rate) / 100) * 100) / 100;
   const vendor_payout = Math.round((subtotal - platform_fee) * 100) / 100;
   const rider_fee = DELIVERY_FEE;
@@ -122,7 +144,17 @@ router.post('/', async (req, res) => {
         rider_fee
       ]
     );
-    res.status(201).json(result.rows[0]);
+    const order = result.rows[0];
+
+    // Notify the customer by SMS and the vendor both by SMS and in-app —
+    // none of this blocks the response; failures are logged, not thrown.
+    sendSMS(phone, `Ilé Market: Thanks ${customer_name.split(' ')[0]}! Order #${order.id} from ${vendor.name} received — total ₦${total.toLocaleString()}.`);
+    if (vendor.owner_phone) {
+      sendSMS(vendor.owner_phone, `Ilé Market: New order #${order.id} from ${customer_name} — ₦${total.toLocaleString()}. Check your dashboard.`);
+    }
+    notifyUser(vendor.owner_id, 'new_order', `New order #${order.id} from ${customer_name} — ₦${total.toLocaleString()}`, order.id);
+
+    res.status(201).json(order);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Could not place order' });
@@ -188,7 +220,9 @@ router.get('/', requireAuth, attachVendorId, async (req, res) => {
   }
 });
 
-// Vendor: update status on one of MY orders
+// Vendor: update status on one of MY orders. Texts the customer with a
+// friendly status update every time, and flips delivery_status to
+// "ready" the moment it's marked out for delivery.
 router.put('/:id/status', requireAuth, attachVendorId, async (req, res) => {
   const { order_status } = req.body;
   const valid = ['received', 'preparing', 'out_for_delivery', 'delivered', 'cancelled'];
@@ -203,18 +237,19 @@ router.put('/:id/status', requireAuth, attachVendorId, async (req, res) => {
       [order_status, req.params.id, req.vendorId]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Order not found' });
-    res.json(result.rows[0]);
+
+    const order = result.rows[0];
+    const messageBuilder = STATUS_MESSAGES[order_status];
+    if (messageBuilder) sendSMS(order.phone, messageBuilder(order));
+
+    res.json(order);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Could not update order' });
   }
 });
 
-// Admin: every delivered order whose money hasn't been reconciled yet —
-// for cash orders this is what the vendor owes the platform (they kept
-// the customer's cash, platform gets nothing automatically); for rider
-// fees this is what's owed to the rider regardless of payment method,
-// since riders are always paid out manually in this build.
+// Admin: unsettled payouts (cash commission owed, rider fees owed)
 router.get('/admin/unsettled', requireAdmin, async (req, res) => {
   try {
     const result = await pool.query(
@@ -235,8 +270,7 @@ router.get('/admin/unsettled', requireAdmin, async (req, res) => {
   }
 });
 
-// Admin: mark one order's payout as reconciled (money has changed hands
-// outside the app — a bank transfer, cash handover, etc.)
+// Admin: mark one order's payout as reconciled
 router.put('/:id/settle', requireAdmin, async (req, res) => {
   try {
     const result = await pool.query(

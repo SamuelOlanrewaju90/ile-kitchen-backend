@@ -4,8 +4,6 @@ const { requireAuth, requireAdmin } = require('../middleware/auth');
 
 const router = express.Router();
 
-// Public: browse approved vendors, with optional search/filter/sort.
-// Query params (all optional): search, cuisine, open_only, min_rating, sort
 router.get('/', async (req, res) => {
   const { search, cuisine, open_only, min_rating, sort } = req.query;
 
@@ -56,8 +54,6 @@ router.get('/', async (req, res) => {
   }
 });
 
-// Public: distinct cuisine types among approved vendors, for a filter dropdown.
-// Placed at a distinct path (not "/:id") so it's never mistaken for a vendor id.
 router.get('/meta/cuisines', async (req, res) => {
   try {
     const result = await pool.query(
@@ -72,7 +68,6 @@ router.get('/meta/cuisines', async (req, res) => {
   }
 });
 
-// Public: one vendor's storefront profile, including its aggregate rating
 router.get('/:id', async (req, res) => {
   try {
     const result = await pool.query(
@@ -96,7 +91,6 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// Vendor: create your vendor profile
 router.post('/', requireAuth, async (req, res) => {
   if (req.user.role !== 'vendor') {
     return res.status(403).json({ error: 'Only vendor accounts can create a vendor profile' });
@@ -120,7 +114,6 @@ router.post('/', requireAuth, async (req, res) => {
   }
 });
 
-// Vendor: get my own profile
 router.get('/me/profile', requireAuth, async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM vendors WHERE owner_id = $1', [req.user.id]);
@@ -132,7 +125,6 @@ router.get('/me/profile', requireAuth, async (req, res) => {
   }
 });
 
-// Vendor: update my own profile
 router.put('/me/profile', requireAuth, async (req, res) => {
   const { name, description, logo_url, cuisine_type, address, is_open, paystack_subaccount_code } = req.body;
   try {
@@ -156,7 +148,6 @@ router.put('/me/profile', requireAuth, async (req, res) => {
   }
 });
 
-// Admin: list every vendor, including ones pending approval
 router.get('/admin/all', requireAdmin, async (req, res) => {
   try {
     const result = await pool.query(
@@ -171,7 +162,6 @@ router.get('/admin/all', requireAdmin, async (req, res) => {
   }
 });
 
-// Admin: approve or reject a vendor application
 router.put('/admin/:id/approval', requireAdmin, async (req, res) => {
   const { is_approved } = req.body;
   try {
@@ -187,7 +177,6 @@ router.put('/admin/:id/approval', requireAdmin, async (req, res) => {
   }
 });
 
-// Admin: change a vendor's commission rate
 router.put('/admin/:id/commission', requireAdmin, async (req, res) => {
   const { commission_rate } = req.body;
   const rate = Number(commission_rate);
@@ -207,7 +196,6 @@ router.put('/admin/:id/commission', requireAdmin, async (req, res) => {
   }
 });
 
-// Admin: platform-wide numbers
 router.get('/admin/stats', requireAdmin, async (req, res) => {
   try {
     const vendorCount = await pool.query('SELECT COUNT(*)::int AS count FROM vendors');

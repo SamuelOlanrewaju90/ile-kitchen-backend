@@ -1,6 +1,7 @@
 const express = require('express');
 const pool = require('../db');
 const { requireAuth, attachRiderId } = require('../middleware/auth');
+const { sendSMS } = require('../lib/sms');
 
 const router = express.Router();
 
@@ -15,7 +16,7 @@ router.get('/me', requireAuth, attachRiderId, async (req, res) => {
   }
 });
 
-// Rider: toggle availability (on shift / off shift)
+// Rider: toggle availability
 router.put('/me/availability', requireAuth, attachRiderId, async (req, res) => {
   const { is_available } = req.body;
   try {
@@ -30,12 +31,11 @@ router.put('/me/availability', requireAuth, attachRiderId, async (req, res) => {
   }
 });
 
-// Rider: report current GPS location. Called periodically from the
-// dashboard while the rider is on an active delivery.
+// Rider: report current GPS position
 router.put('/me/location', requireAuth, attachRiderId, async (req, res) => {
   const { lat, lng } = req.body;
-  if (typeof lat !== 'number' || typeof lng !== 'number') {
-    return res.status(400).json({ error: 'lat and lng must be numbers' });
+  if (lat === undefined || lng === undefined) {
+    return res.status(400).json({ error: 'lat and lng are required' });
   }
   try {
     const result = await pool.query(
@@ -65,9 +65,7 @@ router.get('/available-orders', requireAuth, attachRiderId, async (req, res) => 
   }
 });
 
-// Rider: claim an order. The WHERE clause double-checks it's still
-// unclaimed at the moment of the update, so two riders tapping "accept"
-// on the same order at the same time can't both succeed.
+// Rider: claim an order (atomic — two riders can't both succeed)
 router.put('/accept/:orderId', requireAuth, attachRiderId, async (req, res) => {
   try {
     const result = await pool.query(
@@ -85,7 +83,7 @@ router.put('/accept/:orderId', requireAuth, attachRiderId, async (req, res) => {
   }
 });
 
-// Rider: my current and past deliveries
+// Rider: my deliveries (active + past)
 router.get('/me/deliveries', requireAuth, attachRiderId, async (req, res) => {
   try {
     const result = await pool.query(
@@ -98,11 +96,13 @@ router.get('/me/deliveries', requireAuth, attachRiderId, async (req, res) => {
     res.json(result.rows);
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: 'Could not load deliveries' });
+    res.status(500).json({ error: 'Could not load your deliveries' });
   }
 });
 
-// Rider: update delivery progress on one of MY assigned orders
+// Rider: update delivery status on one of MY deliveries. Marking
+// "delivered" also syncs the vendor-facing order_status and texts the
+// customer, so every party's view stays in sync from one action.
 router.put('/deliveries/:orderId/status', requireAuth, attachRiderId, async (req, res) => {
   const { delivery_status } = req.body;
   const valid = ['picked_up', 'in_transit', 'delivered'];
@@ -110,8 +110,6 @@ router.put('/deliveries/:orderId/status', requireAuth, attachRiderId, async (req
     return res.status(400).json({ error: 'Invalid delivery status' });
   }
   try {
-    // When a delivery is marked "delivered," also flip the vendor-facing
-    // order_status to match, so both dashboards agree on the end state.
     const orderStatusUpdate = delivery_status === 'delivered' ? `, order_status = 'delivered'` : '';
     const result = await pool.query(
       `UPDATE orders SET delivery_status = $1 ${orderStatusUpdate}
@@ -119,6 +117,12 @@ router.put('/deliveries/:orderId/status', requireAuth, attachRiderId, async (req
       [delivery_status, req.params.orderId, req.riderId]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Delivery not found' });
+
+    if (delivery_status === 'delivered') {
+      const order = result.rows[0];
+      sendSMS(order.phone, `Your order #${order.id} from Ilé Market has been delivered. Enjoy your meal!`);
+    }
+
     res.json(result.rows[0]);
   } catch (err) {
     console.error(err);
