@@ -3,10 +3,9 @@ const https = require('https');
 const pool = require('../db');
 const { requireAuth, requireAdmin, attachVendorId } = require('../middleware/auth');
 const { sendSMS } = require('../lib/sms');
+const { createOrder } = require('../lib/createOrder');
 
 const router = express.Router();
-
-const DELIVERY_FEE = 500;
 
 const STATUS_MESSAGES = {
   received: (order) => `Ilé Market: Order #${order.id} received by the restaurant and will be prepared shortly.`,
@@ -45,17 +44,6 @@ async function getSetting(key, fallback) {
   return result.rows[0]?.value ?? fallback;
 }
 
-async function notifyUser(userId, type, message, orderId = null) {
-  try {
-    await pool.query(
-      'INSERT INTO notifications (user_id, type, message, order_id) VALUES ($1, $2, $3, $4)',
-      [userId, type, message, orderId]
-    );
-  } catch (err) {
-    console.error('Could not create notification:', err);
-  }
-}
-
 // Public: place an order with a specific vendor
 router.post('/', async (req, res) => {
   const { vendor_id, customer_name, phone, address, notes, items, payment_method, payment_reference } = req.body;
@@ -67,12 +55,7 @@ router.post('/', async (req, res) => {
     return res.status(400).json({ error: 'Invalid payment method' });
   }
 
-  const vendorResult = await pool.query(
-    `SELECT vendors.*, users.phone AS owner_phone
-     FROM vendors JOIN users ON vendors.owner_id = users.id
-     WHERE vendors.id = $1`,
-    [vendor_id]
-  );
+  const vendorResult = await pool.query('SELECT * FROM vendors WHERE id = $1', [vendor_id]);
   const vendor = vendorResult.rows[0];
   if (!vendor || !vendor.is_approved) {
     return res.status(400).json({ error: 'This restaurant is not available right now.' });
@@ -90,6 +73,7 @@ router.post('/', async (req, res) => {
     });
   }
 
+  const DELIVERY_FEE = 500;
   const total = subtotal + DELIVERY_FEE;
   let payment_status = 'pending';
 
@@ -97,6 +81,16 @@ router.post('/', async (req, res) => {
     if (!payment_reference) {
       return res.status(400).json({ error: 'Missing payment reference' });
     }
+
+    // The Paystack webhook can beat this request here on a slow connection
+    // (it fires from Paystack's servers, independent of the customer's
+    // browser). If it already created this order, just return it instead
+    // of creating a duplicate.
+    const already = await pool.query('SELECT * FROM orders WHERE payment_reference = $1', [payment_reference]);
+    if (already.rows.length > 0) {
+      return res.status(201).json(already.rows[0]);
+    }
+
     try {
       const verification = await verifyPaystackTransaction(payment_reference);
       const paidAmountKobo = verification?.data?.amount;
@@ -116,44 +110,18 @@ router.post('/', async (req, res) => {
     }
   }
 
-  const platform_fee = Math.round(subtotal * (Number(vendor.commission_rate) / 100) * 100) / 100;
-  const vendor_payout = Math.round((subtotal - platform_fee) * 100) / 100;
-  const rider_fee = DELIVERY_FEE;
-
   try {
-    const result = await pool.query(
-      `INSERT INTO orders
-        (vendor_id, customer_name, phone, address, notes, items, subtotal, delivery_fee, total,
-         payment_method, payment_status, payment_reference, platform_fee, vendor_payout, rider_fee)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
-      [
-        vendor_id,
-        customer_name,
-        phone,
-        address,
-        notes || '',
-        JSON.stringify(items),
-        subtotal,
-        DELIVERY_FEE,
-        total,
-        payment_method,
-        payment_status,
-        payment_reference || null,
-        platform_fee,
-        vendor_payout,
-        rider_fee
-      ]
-    );
-    const order = result.rows[0];
-
-    // Notify the customer by SMS and the vendor both by SMS and in-app —
-    // none of this blocks the response; failures are logged, not thrown.
-    sendSMS(phone, `Ilé Market: Thanks ${customer_name.split(' ')[0]}! Order #${order.id} from ${vendor.name} received — total ₦${total.toLocaleString()}.`);
-    if (vendor.owner_phone) {
-      sendSMS(vendor.owner_phone, `Ilé Market: New order #${order.id} from ${customer_name} — ₦${total.toLocaleString()}. Check your dashboard.`);
-    }
-    notifyUser(vendor.owner_id, 'new_order', `New order #${order.id} from ${customer_name} — ₦${total.toLocaleString()}`, order.id);
-
+    const order = await createOrder({
+      vendor_id,
+      customer_name,
+      phone,
+      address,
+      notes,
+      items,
+      payment_method,
+      payment_status,
+      payment_reference
+    });
     res.status(201).json(order);
   } catch (err) {
     console.error(err);
